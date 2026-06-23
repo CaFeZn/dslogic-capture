@@ -1,0 +1,4 @@
+interface:
+  display_name: "DSLogic Capture"
+  short_description: "Direct USB capture for DSLogic logic analyzers"
+  default_prompt: "Use $dslogic-capture to capture and inspect logic analyzer signals from a DSLogic device."
