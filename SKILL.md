@@ -50,6 +50,22 @@ python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
   --output-dir D:\Codes\HPM\.tools
 ```
 
+SPI decode, with `CH0=CS`, `CH1=SCLK`, `CH2=MOSI`, and `CH3=MISO`:
+
+```powershell
+python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
+  --samplerate 10000000 `
+  --samples 262144 `
+  --protocol spi `
+  --cs-ch 0 `
+  --sclk-ch 1 `
+  --mosi-ch 2 `
+  --miso-ch 3 `
+  --spi-cpol 0 `
+  --spi-cpha 0 `
+  --output-dir D:\Codes\HPM\.tools
+```
+
 Use `--samplerate 10000000 --samples 262144` for short high-resolution checks. Use lower samplerates and more samples for longer scans.
 
 ## Outputs
@@ -67,6 +83,7 @@ The summary JSON stores samplerate, aligned sample count, channel edge summaries
 
 - `raw`: capture and summarize channel transitions only.
 - `i2c`: decode START/STOP, address/RW, ACK/NACK, and estimate SCL frequency. Interpret `ack_bit=0` as ACK and `ack_bit=1` as NACK.
+- `spi`: decode CS-framed SPI bytes on MOSI and MISO. Configure `--spi-cpol`, `--spi-cpha`, `--spi-lsb-first`, and `--cs-active-level` to match the bus.
 
 Typical I2C no-device scan output:
 

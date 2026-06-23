@@ -352,6 +352,114 @@ def decode_i2c(channel_data, samplerate, scl_ch, sda_ch, max_transactions):
     }
 
 
+def bits_to_bytes(bits, lsb_first=False):
+    values = []
+    for offset in range(0, len(bits) - (len(bits) % 8), 8):
+        byte = 0
+        chunk = bits[offset:offset + 8]
+        if lsb_first:
+            for bit_index, bit in enumerate(chunk):
+                byte |= bit << bit_index
+        else:
+            for bit in chunk:
+                byte = (byte << 1) | bit
+        values.append(byte)
+    return values
+
+
+def find_active_spans(signal, active_level):
+    spans = []
+    start = 0 if signal and signal[0] == active_level else None
+    for index in range(1, len(signal)):
+        if signal[index] == active_level and signal[index - 1] != active_level:
+            start = index
+        elif signal[index] != active_level and signal[index - 1] == active_level:
+            if start is not None:
+                spans.append((start, index))
+            start = None
+    if start is not None:
+        spans.append((start, len(signal) - 1))
+    return spans
+
+
+def decode_spi(
+    channel_data,
+    samplerate,
+    cs_ch,
+    sclk_ch,
+    mosi_ch,
+    miso_ch,
+    cs_active_level,
+    cpol,
+    cpha,
+    lsb_first,
+    max_transactions,
+):
+    cs = channel_data[cs_ch]
+    sclk = channel_data[sclk_ch]
+    mosi = channel_data.get(mosi_ch) if mosi_ch >= 0 else None
+    miso = channel_data.get(miso_ch) if miso_ch >= 0 else None
+    sample_level = (1 - cpol) if cpha == 0 else cpol
+    spans = find_active_spans(cs, cs_active_level)
+    frames = []
+    edge_periods = []
+
+    for start, stop in spans:
+        sample_edges = []
+        for index in range(max(start + 1, 1), stop):
+            if sclk[index] != sclk[index - 1] and sclk[index] == sample_level:
+                sample_edges.append(index)
+        edge_periods.extend([b - a for a, b in zip(sample_edges, sample_edges[1:])])
+        mosi_bits = [mosi[index] for index in sample_edges] if mosi is not None else []
+        miso_bits = [miso[index] for index in sample_edges] if miso is not None else []
+        frames.append({
+            "start_sample": start,
+            "stop_sample": stop,
+            "bit_count": len(sample_edges),
+            "mosi_bytes": bits_to_bytes(mosi_bits, lsb_first) if mosi is not None else None,
+            "miso_bytes": bits_to_bytes(miso_bits, lsb_first) if miso is not None else None,
+        })
+
+    sclk_hz = None
+    if edge_periods:
+        avg = sum(edge_periods[:64]) / min(len(edge_periods), 64)
+        sclk_hz = samplerate / avg
+
+    mode = (cpol << 1) | cpha
+    print(
+        f"protocol spi mode={mode} CH{cs_ch}=CS CH{sclk_ch}=SCLK "
+        f"CH{mosi_ch}=MOSI CH{miso_ch}=MISO"
+    )
+    print("frames", len(frames))
+    for index, frame in enumerate(frames[:max_transactions]):
+        mosi_text = "" if frame["mosi_bytes"] is None else " ".join(
+            f"{byte:02X}" for byte in frame["mosi_bytes"]
+        )
+        miso_text = "" if frame["miso_bytes"] is None else " ".join(
+            f"{byte:02X}" for byte in frame["miso_bytes"]
+        )
+        print(
+            f"SPI{index} start={frame['start_sample']} stop={frame['stop_sample']} "
+            f"bits={frame['bit_count']} MOSI=[{mosi_text}] MISO=[{miso_text}]"
+        )
+    if sclk_hz is not None:
+        print(f"sclk_hz~{sclk_hz:.1f}")
+
+    return {
+        "protocol": "spi",
+        "cs_ch": cs_ch,
+        "sclk_ch": sclk_ch,
+        "mosi_ch": mosi_ch,
+        "miso_ch": miso_ch,
+        "cs_active_level": cs_active_level,
+        "cpol": cpol,
+        "cpha": cpha,
+        "lsb_first": lsb_first,
+        "sclk_hz": sclk_hz,
+        "frames": frames,
+    }
+
+
 def write_csv_samples(path, channel_data, channels, limit):
     if not channels:
         return
@@ -370,6 +478,12 @@ def run(args):
     protocol_channels = set(channels)
     if args.protocol == "i2c":
         protocol_channels.update([args.scl_ch, args.sda_ch])
+    if args.protocol == "spi":
+        protocol_channels.update([args.cs_ch, args.sclk_ch])
+        if args.mosi_ch >= 0:
+            protocol_channels.add(args.mosi_ch)
+        if args.miso_ch >= 0:
+            protocol_channels.add(args.miso_ch)
     channels = sorted(protocol_channels)
 
     header, data, meta = capture_usb(args.samplerate, args.samples)
@@ -410,6 +524,20 @@ def run(args):
             args.sda_ch,
             args.max_transactions,
         )
+    elif args.protocol == "spi":
+        protocol_result = decode_spi(
+            channel_data,
+            args.samplerate,
+            args.cs_ch,
+            args.sclk_ch,
+            args.mosi_ch,
+            args.miso_ch,
+            args.cs_active_level,
+            args.spi_cpol,
+            args.spi_cpha,
+            args.spi_lsb_first,
+            args.max_transactions,
+        )
 
     if args.export_csv:
         csv_path = output_dir / f"{args.prefix}_samples.csv"
@@ -437,9 +565,17 @@ def main():
     parser.add_argument("--samplerate", type=int, default=10_000_000)
     parser.add_argument("--samples", type=int, default=262144)
     parser.add_argument("--channels", default="0,1,2,3")
-    parser.add_argument("--protocol", choices=["raw", "i2c"], default="raw")
+    parser.add_argument("--protocol", choices=["raw", "i2c", "spi"], default="raw")
     parser.add_argument("--scl-ch", type=int, default=0)
     parser.add_argument("--sda-ch", type=int, default=1)
+    parser.add_argument("--cs-ch", type=int, default=0)
+    parser.add_argument("--sclk-ch", type=int, default=1)
+    parser.add_argument("--mosi-ch", type=int, default=2)
+    parser.add_argument("--miso-ch", type=int, default=3)
+    parser.add_argument("--cs-active-level", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--spi-cpol", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--spi-cpha", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--spi-lsb-first", action="store_true")
     parser.add_argument("--max-transactions", type=int, default=40)
     parser.add_argument("--output-dir", type=Path, default=Path.cwd() / ".dslogic-captures")
     parser.add_argument("--prefix", default="dslogic_capture")
