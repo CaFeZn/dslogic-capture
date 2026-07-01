@@ -45,7 +45,7 @@ Raw capture and channel edge summary:
 python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
   --samplerate 1000000 `
   --samples 1048576 `
-  --channels 0,1,2,3 `
+  --channels '0,1,2,3' `
   --protocol raw `
   --output-dir D:\Codes\HPM\.tools
 ```
@@ -80,6 +80,50 @@ python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
 ```
 
 Use `--samplerate 10000000 --samples 262144` for short high-resolution checks. Use lower samplerates and more samples for longer scans.
+
+## Stable Windows/PowerShell Workflow
+
+Use these guardrails for repeatable captures from Codex on Windows:
+
+- Quote comma-separated arguments in PowerShell. For example, use `--channels '0,1,2,3'`; unquoted `0,1,2,3` can be passed as multiple native-process arguments and fail with `unrecognized arguments`.
+- After USB unplug/replug or a red analyzer LED, run `--init-only` or a normal capture command with the correct `--fpga-bitstream` before expecting decode output. A green LED means the FPGA capture core was loaded and enabled.
+- Prefer a short but complete first capture for startup SPI checks, such as `--samplerate 10000000 --samples 20000000` for about 2 seconds. Increase to larger captures only after the short run produces a summary.
+- If running the script in a PowerShell background job, do not kill or `Remove-Job -Force` the job before `<prefix>_summary.json` is written. If a wait times out, either wait longer or rerun with fewer samples.
+- Keep the first pass raw or low-transaction-count protocol decode. Once the edge summary confirms channel activity and polarity, increase `--max-transactions`.
+
+## HPM SPI Example
+
+For the HPM5361EVKLite SPI CS0 + W25Q128 wiring used during validation:
+
+- `CH3=CS`
+- `CH1=SCLK`
+- `CH0=MOSI`
+- `CH2=MISO`
+- SPI mode 0: `--spi-cpol 0 --spi-cpha 0`
+
+Stable command:
+
+```powershell
+python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
+  --samplerate 10000000 `
+  --samples 20000000 `
+  --protocol spi `
+  --channels '0,1,2,3' `
+  --cs-ch 3 `
+  --sclk-ch 1 `
+  --mosi-ch 0 `
+  --miso-ch 2 `
+  --spi-cpol 0 `
+  --spi-cpha 0 `
+  --max-transactions 160 `
+  --output-dir D:\Codes\HPM\.tools `
+  --prefix hpm5361_spi_capture `
+  --fpga-bitstream D:\Codes\HPM\.tools\DSView-local\res\DSLogicU2Pro16.bin
+```
+
+Known-good HPM SPI command frames include `MOSI=[9F 00 00 00]` plus commands `90`, `AB`, `5A`, `05`, `35`, `15`, and `03` framed by CS. If CS, SCLK, and MOSI decode cleanly but JEDEC ID reads wrong, verify the flash module, MISO wiring, pull-up/pull-down behavior, and board pin sharing before changing the decoder.
+
+The HPM SPI test firmware may periodically switch into a GPIO logic-analyzer marker phase. In that phase the summary can show low-frequency edges, empty SPI bytes, and `sclk_hz` near GPIO marker timing rather than the SPI clock. Wait for the marker phase to finish, reset/retrigger the firmware, or use a clean SPI-only firmware loop before treating that output as an SPI decoder failure.
 
 ## Outputs
 
