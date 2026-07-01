@@ -21,10 +21,23 @@ Use the bundled script to:
 
 1. Close DSView; the analyzer USB interface is exclusive.
 2. Confirm the analyzer appears as `2A0E:002D` with WinUSB/libusb.
-3. Capture raw first when the signal is unknown.
-4. Select a protocol decoder only after the channel mapping is known.
-5. Extend this same script for new protocols instead of creating another skill.
-6. Run only one capture process at a time; parallel captures will race for the same USB interface.
+3. If the analyzer LED is red after USB plug-in, initialize the FPGA capture core first. The script auto-loads `DSLogicU2Pro16.bin` when it can find DSView resources, or use `--fpga-bitstream`.
+4. Capture raw first when the signal is unknown.
+5. Select a protocol decoder only after the channel mapping is known.
+6. Extend this same script for new protocols instead of creating another skill.
+7. Run only one capture process at a time; parallel captures will race for the same USB interface.
+
+Initialize only, without capturing:
+
+```powershell
+python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
+  --init-only `
+  --output-dir D:\Codes\HPM\.tools
+```
+
+If a wrong or stale FPGA image may already be loaded, add `--force-fpga-init`. Prefer the bitstream from the same DSView distribution that works manually, for example `D:\Codes\HPM\.tools\DSView-local\res\DSLogicU2Pro16.bin`.
+
+For DSLogic U2Pro16, the script also performs the DSView security handshake and front-end setup after FPGA initialization, including the 1.0 V threshold and 500 MHz ADC clock setup. Use `--skip-security-check` only for diagnosis.
 
 Raw capture and channel edge summary:
 
@@ -112,6 +125,7 @@ For new decoders, preserve these conventions:
 
 - If the device cannot be opened, close DSView and any other process using the analyzer. Do not run two capture commands in parallel.
 - If Python imports fail, install `pyusb` and `libusb-package` in the active Python environment.
+- If `HDL=0x0` or the LED stays red, the USB firmware is present but the FPGA capture core is not loaded. Re-run without `--skip-fpga-init`, install DSView resources, set `DSLOGIC_FPGA_BITSTREAM`, or pass `--fpga-bitstream <path-to-DSLogicU2Pro16.bin>`.
 - If no edges appear, verify probe channel, ground reference, signal voltage, and capture duration.
 - If a protocol decode fails, inspect `--protocol raw` edge summaries first and correct channel mapping.
 - Do not treat this as DAP USB capture. DAP flashes/runs firmware; this captures the logic analyzer USB stream containing sampled pin levels.
