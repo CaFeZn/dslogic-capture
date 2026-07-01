@@ -21,7 +21,7 @@ Use the bundled script to:
 
 1. Close DSView; the analyzer USB interface is exclusive.
 2. Confirm the analyzer appears as `2A0E:002D` with WinUSB/libusb.
-3. If the analyzer LED is red after USB plug-in, initialize and enable the FPGA capture core before decoding. A normal capture command performs this automatically; use `--init-only` when the user only wants to bring the analyzer to the ready/green-LED state. The script auto-loads `DSLogicU2Pro16.bin` when it can find DSView resources, or use `--fpga-bitstream`.
+3. If the analyzer LED is red after USB plug-in, initialize and enable the FPGA capture core before decoding. Opening DSView once can make the LED turn green because DSView performs this cold-start setup implicitly; the script must do the same setup before any useful capture. A normal capture command performs this automatically; use `--init-only` when the user only wants to bring the analyzer to the ready/green-LED state. The script auto-loads `DSLogicU2Pro16.bin` when it can find DSView resources, or use `--fpga-bitstream`.
 4. Capture raw first when the signal is unknown.
 5. Select a protocol decoder only after the channel mapping is known.
 6. Extend this same script for new protocols instead of creating another skill.
@@ -35,7 +35,7 @@ python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
   --output-dir D:\Codes\HPM\.tools
 ```
 
-After unplug/replug, run the `--init-only` command or any capture command before expecting protocol decode output. If a wrong or stale FPGA image may already be loaded, add `--force-fpga-init`. Prefer the bitstream from the same DSView distribution that works manually, for example `D:\Codes\HPM\.tools\DSView-local\res\DSLogicU2Pro16.bin`.
+After unplug/replug, run the `--init-only` command or any capture command before expecting protocol decode output. A red LED normally means only the USB firmware is alive; the analyzer is not ready until the FPGA image is loaded and the capture core is enabled. If a wrong or stale FPGA image may already be loaded, add `--force-fpga-init`. Prefer the bitstream from the same DSView distribution that works manually, for example `D:\Codes\HPM\.tools\DSView-local\res\DSLogicU2Pro16.bin`.
 
 For DSLogic U2Pro16, the script also performs the DSView security handshake and front-end setup after FPGA initialization, including the 1.0 V threshold and 500 MHz ADC clock setup. Use `--skip-security-check` only for diagnosis.
 
