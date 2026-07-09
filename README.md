@@ -5,7 +5,8 @@ DSLogic-compatible logic analyzers.
 
 This repository is a Codex skill plus a reusable Python capture script. It is
 designed as one general logic-analyzer workflow: capture raw samples first, then
-optionally decode protocols such as I2C or SPI from the same saved data path.
+optionally decode protocols such as I2C, SPI, or CAN/CAN FD from the same saved
+data path.
 
 ## What It Does
 
@@ -83,6 +84,29 @@ python scripts\dslogic_capture.py `
   --output-dir .\.dslogic-captures
 ```
 
+CAN FD decode from one digital channel:
+
+```powershell
+python scripts\dslogic_capture.py `
+  --samplerate 50000000 `
+  --samples 25000000 `
+  --channels '0' `
+  --protocol can `
+  --can-ch 0 `
+  --can-bitrate 500000 `
+  --can-data-bitrate 2000000 `
+  --can-sample-point 0.875 `
+  --can-data-sample-point 0.750 `
+  --can-dominant-level 0 `
+  --output-dir .\.dslogic-captures
+```
+
+The CAN decoder accepts one recessive/dominant digital waveform. A differential
+CANH/CANL pair is not required when one probe channel already carries a decodable
+digital level. Use 50 MHz sampling for 500 kbit/s nominal plus 2 Mbit/s data
+phase CAN FD; lower sampling rates may be enough for IDs/DLCs but are not
+recommended for long payload inspection.
+
 ## Output Files
 
 The script writes files named from `--prefix`:
@@ -101,6 +125,8 @@ Current decoders:
 - `i2c`: decode START/STOP, address/RW, ACK/NACK, and estimate SCL frequency.
 - `spi`: decode CS-framed SPI bytes on MOSI and MISO with configurable CPOL,
   CPHA, bit order, and CS polarity.
+- `can`: decode single-channel CAN/CAN FD IDs, standard/extended format, FD,
+  BRS, ESI, DLC, and payload bytes. CRC validation is not implemented.
 
 I2C ACK convention:
 
@@ -119,8 +145,8 @@ The key workflow is:
 1. Close DSView.
 2. Confirm the analyzer appears as `2A0E:002D` with WinUSB/libusb.
 3. Capture `--protocol raw` first if the channel mapping is unknown.
-4. Select a decoder only after SCL/SDA, CS/SCLK/MOSI/MISO, or other mappings are
-   known.
+4. Select a decoder only after SCL/SDA, CS/SCLK/MOSI/MISO, CAN, or other
+   mappings are known.
 5. Save raw artifacts so captures can be inspected or decoded again later.
 
 ## Extending

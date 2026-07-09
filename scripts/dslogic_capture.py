@@ -4,6 +4,7 @@ import json
 import math
 import struct
 import time
+from collections import Counter
 from pathlib import Path
 
 import libusb_package
@@ -833,6 +834,355 @@ def decode_spi(
     }
 
 
+class CanDecodeError(Exception):
+    pass
+
+
+FD_DLC_TO_LEN = {
+    9: 12,
+    10: 16,
+    11: 20,
+    12: 24,
+    13: 32,
+    14: 48,
+    15: 64,
+}
+
+
+def can_dlc_to_len(dlc, is_fd, is_remote=False):
+    if is_remote:
+        return 0
+    if is_fd:
+        return FD_DLC_TO_LEN.get(dlc, dlc)
+    return min(dlc, 8)
+
+
+def can_data_to_hex(data):
+    return " ".join(f"{byte:02X}" for byte in data)
+
+
+class CanBitReader:
+    def __init__(
+        self,
+        signal,
+        start_sample,
+        samplerate,
+        bitrate,
+        data_bitrate,
+        sample_point,
+        data_sample_point,
+        dominant_level,
+    ):
+        self.signal = signal
+        self.bit_start = float(start_sample)
+        self.nominal_period = samplerate / bitrate
+        self.data_period = samplerate / data_bitrate if data_bitrate else self.nominal_period
+        self.period = self.nominal_period
+        self.sample_point = sample_point
+        self.nominal_sample_point = sample_point
+        self.data_sample_point = data_sample_point
+        self.dominant_level = dominant_level
+        self.raw_bits = 0
+        self.destuffed_bits = 0
+        self.stuff_bits = 0
+        self.run_value = None
+        self.run_length = 0
+
+    def resync_to_edge(self, window_fraction=0.25):
+        center = int(round(self.bit_start))
+        radius = max(1, int(round(self.period * window_fraction)))
+        start = max(1, center - radius)
+        stop = min(len(self.signal) - 1, center + radius)
+        best_edge = None
+        best_distance = None
+        for index in range(start, stop + 1):
+            if self.signal[index] == self.signal[index - 1]:
+                continue
+            distance = abs(index - center)
+            if best_distance is None or distance < best_distance:
+                best_edge = index
+                best_distance = distance
+        if best_edge is not None:
+            self.bit_start = float(best_edge)
+
+    def set_data_phase(self, enabled):
+        if enabled:
+            self.period = self.data_period
+            self.sample_point = self.data_sample_point
+        else:
+            self.period = self.nominal_period
+            self.sample_point = self.nominal_sample_point
+
+    def sample_physical_bit(self):
+        if self.raw_bits > 0:
+            self.resync_to_edge()
+        sample = int(round(self.bit_start + (self.period * self.sample_point)))
+        if sample < 0 or sample >= len(self.signal):
+            raise CanDecodeError("capture ended before frame data was complete")
+        raw = self.signal[sample]
+        self.bit_start += self.period
+        self.raw_bits += 1
+        return 0 if raw == self.dominant_level else 1
+
+    def read_bit(self):
+        if self.run_length == 5:
+            stuff = self.sample_physical_bit()
+            if stuff == self.run_value:
+                raise CanDecodeError("bit stuffing violation")
+            self.stuff_bits += 1
+            self.run_value = stuff
+            self.run_length = 1
+
+        bit = self.sample_physical_bit()
+        if self.run_value is None or bit != self.run_value:
+            self.run_value = bit
+            self.run_length = 1
+        else:
+            self.run_length += 1
+        self.destuffed_bits += 1
+        return bit
+
+    def read_bits(self, count):
+        value = 0
+        for _ in range(count):
+            value = (value << 1) | self.read_bit()
+        return value
+
+    def read_bytes(self, count):
+        return [self.read_bits(8) for _ in range(count)]
+
+
+def count_level(values, start, stop, level):
+    count = 0
+    for index in range(max(start, 0), min(stop, len(values))):
+        if values[index] == level:
+            count += 1
+    return count
+
+
+def find_can_sof_candidates(signal, samplerate, bitrate, sample_point, dominant_level, min_idle_bits):
+    period = samplerate / bitrate
+    idle_samples = max(1, int(round(period * min_idle_bits)))
+    recessive_level = 1 - dominant_level
+    candidates = []
+
+    for index in range(1, len(signal)):
+        if signal[index - 1] != recessive_level or signal[index] != dominant_level:
+            continue
+        if index < idle_samples:
+            continue
+        idle_count = count_level(signal, index - idle_samples, index, recessive_level)
+        if idle_count < int(idle_samples * 0.95):
+            continue
+        sample_index = int(round(index + (period * sample_point)))
+        if sample_index >= len(signal) or signal[sample_index] != dominant_level:
+            continue
+        candidates.append(index)
+    return candidates
+
+
+def decode_can_frame_at(
+    signal,
+    start_sample,
+    samplerate,
+    bitrate,
+    data_bitrate,
+    sample_point,
+    data_sample_point,
+    dominant_level,
+):
+    reader = CanBitReader(
+        signal,
+        start_sample,
+        samplerate,
+        bitrate,
+        data_bitrate,
+        sample_point,
+        data_sample_point,
+        dominant_level,
+    )
+
+    sof = reader.read_bit()
+    if sof != 0:
+        raise CanDecodeError("SOF was not dominant")
+
+    base_id = reader.read_bits(11)
+    rtr_or_srr = reader.read_bit()
+    ide = reader.read_bit()
+
+    frame = {
+        "start_sample": start_sample,
+        "id": base_id,
+        "id_hex": f"0x{base_id:X}",
+        "ext": False,
+        "fd": False,
+        "remote": False,
+        "brs": False,
+        "esi": None,
+        "dlc": None,
+        "len": 0,
+        "data": [],
+        "data_hex": "",
+        "crc_checked": False,
+    }
+
+    if ide == 0:
+        control = reader.read_bit()
+        if control == 1:
+            frame["fd"] = True
+            frame["remote"] = False
+            frame["rrs"] = rtr_or_srr
+            frame["fdf"] = control
+            frame["res"] = reader.read_bit()
+            frame["brs"] = bool(reader.read_bit())
+            if frame["brs"]:
+                reader.set_data_phase(True)
+            frame["esi"] = reader.read_bit()
+            frame["dlc"] = reader.read_bits(4)
+            frame["len"] = can_dlc_to_len(frame["dlc"], True)
+            frame["data"] = reader.read_bytes(frame["len"])
+        else:
+            frame["remote"] = bool(rtr_or_srr)
+            frame["r0"] = control
+            frame["dlc"] = reader.read_bits(4)
+            frame["len"] = can_dlc_to_len(frame["dlc"], False, frame["remote"])
+            frame["data"] = reader.read_bytes(frame["len"])
+    else:
+        ext_id = reader.read_bits(18)
+        frame["id"] = (base_id << 18) | ext_id
+        frame["id_hex"] = f"0x{frame['id']:X}"
+        frame["ext"] = True
+        rtr_or_rrs = reader.read_bit()
+        control = reader.read_bit()
+        if control == 1:
+            frame["fd"] = True
+            frame["remote"] = False
+            frame["rrs"] = rtr_or_rrs
+            frame["fdf"] = control
+            frame["res"] = reader.read_bit()
+            frame["brs"] = bool(reader.read_bit())
+            if frame["brs"]:
+                reader.set_data_phase(True)
+            frame["esi"] = reader.read_bit()
+            frame["dlc"] = reader.read_bits(4)
+            frame["len"] = can_dlc_to_len(frame["dlc"], True)
+            frame["data"] = reader.read_bytes(frame["len"])
+        else:
+            frame["remote"] = bool(rtr_or_rrs)
+            frame["r1"] = control
+            frame["r0"] = reader.read_bit()
+            frame["dlc"] = reader.read_bits(4)
+            frame["len"] = can_dlc_to_len(frame["dlc"], False, frame["remote"])
+            frame["data"] = reader.read_bytes(frame["len"])
+
+    frame["data_hex"] = can_data_to_hex(frame["data"])
+    frame["after_data_sample"] = int(round(reader.bit_start))
+    frame["raw_bits_to_data_end"] = reader.raw_bits
+    frame["destuffed_bits_to_data_end"] = reader.destuffed_bits
+    frame["stuff_bits_to_data_end"] = reader.stuff_bits
+    return frame
+
+
+def decode_can(
+    channel_data,
+    samplerate,
+    can_ch,
+    bitrate,
+    data_bitrate,
+    sample_point,
+    data_sample_point,
+    dominant_level,
+    min_idle_bits,
+    max_transactions,
+):
+    signal = channel_data[can_ch]
+    candidates = find_can_sof_candidates(
+        signal,
+        samplerate,
+        bitrate,
+        sample_point,
+        dominant_level,
+        min_idle_bits,
+    )
+    frames = []
+    errors = []
+    last_start = -1
+    min_gap = int(round((samplerate / bitrate) * min_idle_bits))
+
+    for start in candidates:
+        if last_start >= 0 and start - last_start < min_gap:
+            continue
+        try:
+            frame = decode_can_frame_at(
+                signal,
+                start,
+                samplerate,
+                bitrate,
+                data_bitrate,
+                sample_point,
+                data_sample_point,
+                dominant_level,
+            )
+            frames.append(frame)
+            last_start = start
+        except CanDecodeError as exc:
+            if len(errors) < 20:
+                errors.append({"start_sample": start, "error": str(exc)})
+
+    len_hist = sorted(Counter(frame["len"] for frame in frames).items())
+    dlc_hist = sorted(Counter(frame["dlc"] for frame in frames).items())
+    id_hist = Counter(frame["id_hex"] for frame in frames)
+    common_ids = id_hist.most_common(32)
+
+    print(
+        f"protocol can CH{can_ch} bitrate={bitrate} data_bitrate={data_bitrate} "
+        f"dominant_level={dominant_level}"
+    )
+    print(f"candidates {len(candidates)} decoded {len(frames)} errors {len(errors)}")
+    print(f"fd_frames {sum(1 for frame in frames if frame['fd'])}")
+    print(f"classic_frames {sum(1 for frame in frames if not frame['fd'])}")
+    print(f"std_frames {sum(1 for frame in frames if not frame['ext'])}")
+    print(f"ext_frames {sum(1 for frame in frames if frame['ext'])}")
+    print(f"brs_frames {sum(1 for frame in frames if frame['brs'])}")
+    print(f"len_hist {len_hist}")
+    print(f"dlc_hist {dlc_hist}")
+    print(f"common_ids {common_ids[:12]}")
+    for index, frame in enumerate(frames[:max_transactions]):
+        id_kind = "E" if frame["ext"] else "S"
+        frame_kind = "FD" if frame["fd"] else ("RTR" if frame["remote"] else "CA")
+        print(
+            f"CAN{index} start={frame['start_sample']} {id_kind} id={frame['id_hex']} "
+            f"{frame_kind} len={frame['len']} dlc={frame['dlc']} "
+            f"brs={int(frame['brs'])} data=[{frame['data_hex']}]"
+        )
+    if errors:
+        print(f"decode_errors {errors[:5]}")
+
+    return {
+        "protocol": "can",
+        "can_ch": can_ch,
+        "bitrate": bitrate,
+        "data_bitrate": data_bitrate,
+        "sample_point": sample_point,
+        "data_sample_point": data_sample_point,
+        "dominant_level": dominant_level,
+        "min_idle_bits": min_idle_bits,
+        "candidate_count": len(candidates),
+        "decoded_count": len(frames),
+        "error_count": len(errors),
+        "errors": errors,
+        "fd_count": sum(1 for frame in frames if frame["fd"]),
+        "classic_count": sum(1 for frame in frames if not frame["fd"]),
+        "std_count": sum(1 for frame in frames if not frame["ext"]),
+        "ext_count": sum(1 for frame in frames if frame["ext"]),
+        "brs_count": sum(1 for frame in frames if frame["brs"]),
+        "len_hist": len_hist,
+        "dlc_hist": dlc_hist,
+        "common_ids": common_ids,
+        "frames": frames,
+    }
+
+
 def write_csv_samples(path, channel_data, channels, limit):
     if not channels:
         return
@@ -892,6 +1242,8 @@ def run(args):
             protocol_channels.add(args.mosi_ch)
         if args.miso_ch >= 0:
             protocol_channels.add(args.miso_ch)
+    if args.protocol == "can":
+        protocol_channels.add(args.can_ch)
     channels = sorted(protocol_channels)
 
     header, data, meta = capture_usb(
@@ -969,6 +1321,19 @@ def run(args):
             args.spi_lsb_first,
             args.max_transactions,
         )
+    elif args.protocol == "can":
+        protocol_result = decode_can(
+            channel_data,
+            args.samplerate,
+            args.can_ch,
+            args.can_bitrate,
+            args.can_data_bitrate,
+            args.can_sample_point,
+            args.can_data_sample_point,
+            args.can_dominant_level,
+            args.can_min_idle_bits,
+            args.max_transactions,
+        )
 
     if args.export_csv:
         csv_path = output_dir / f"{args.prefix}_samples.csv"
@@ -997,7 +1362,7 @@ def main():
     parser.add_argument("--samplerate", type=int, default=10_000_000)
     parser.add_argument("--samples", type=int, default=262144)
     parser.add_argument("--channels", default="0,1,2,3")
-    parser.add_argument("--protocol", choices=["raw", "i2c", "spi"], default="raw")
+    parser.add_argument("--protocol", choices=["raw", "i2c", "spi", "can"], default="raw")
     parser.add_argument("--scl-ch", type=int, default=0)
     parser.add_argument("--sda-ch", type=int, default=1)
     parser.add_argument("--cs-ch", type=int, default=0)
@@ -1008,6 +1373,13 @@ def main():
     parser.add_argument("--spi-cpol", type=int, choices=[0, 1], default=0)
     parser.add_argument("--spi-cpha", type=int, choices=[0, 1], default=0)
     parser.add_argument("--spi-lsb-first", action="store_true")
+    parser.add_argument("--can-ch", type=int, default=0)
+    parser.add_argument("--can-bitrate", type=int, default=500_000)
+    parser.add_argument("--can-data-bitrate", type=int, default=2_000_000)
+    parser.add_argument("--can-sample-point", type=float, default=0.875)
+    parser.add_argument("--can-data-sample-point", type=float, default=0.750)
+    parser.add_argument("--can-dominant-level", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--can-min-idle-bits", type=int, default=11)
     parser.add_argument(
         "--decode-layout",
         choices=["auto", "sample-major", "channel-major"],

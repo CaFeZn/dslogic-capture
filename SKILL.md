@@ -79,6 +79,38 @@ python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
   --output-dir D:\Codes\HPM\.tools
 ```
 
+CAN/CAN FD decode from one digital channel:
+
+```powershell
+python C:\Users\asus\.codex\skills\dslogic-capture\scripts\dslogic_capture.py `
+  --samplerate 50000000 `
+  --samples 25000000 `
+  --channels '0' `
+  --protocol can `
+  --can-ch 0 `
+  --can-bitrate 500000 `
+  --can-data-bitrate 2000000 `
+  --can-sample-point 0.875 `
+  --can-data-sample-point 0.750 `
+  --can-dominant-level 0 `
+  --output-dir D:\Codes\HPM\.tools
+```
+
+The CAN decoder works from a single digital waveform. It does not require a
+differential CANH/CANL pair if one analyzer channel already sees a valid
+recessive/dominant digital level, for example a transceiver RXD/TXD pin or one
+bus-side probe that DSView can also decode. Use `--can-dominant-level 0` for the
+normal recessive-high/dominant-low waveform; flip it to `1` only when the probed
+signal is inverted.
+
+For HPM/xrobot CAN FD at 500 kbit/s nominal and 2 Mbit/s data phase, prefer
+`--samplerate 50000000`. A 10 MHz capture can identify activity and often decode
+IDs/DLCs, but 2 Mbit/s data phase has only 5 samples per bit and is too tight for
+reliable long-payload decoding. The decoder reports standard/extended ID,
+classic/FD, RTR, BRS, ESI, DLC, payload bytes, length histograms, and common IDs.
+It does not validate CRC yet, so use an external CAN tool for CRC/error-frame
+validation when that matters.
+
 Use `--samplerate 10000000 --samples 262144` for short high-resolution checks. Use lower samplerates and more samples for longer scans.
 
 ## Stable Windows/PowerShell Workflow
@@ -141,6 +173,8 @@ The summary JSON stores samplerate, aligned sample count, channel edge summaries
 - `raw`: capture and summarize channel transitions only.
 - `i2c`: decode START/STOP, address/RW, ACK/NACK, and estimate SCL frequency. Interpret `ack_bit=0` as ACK and `ack_bit=1` as NACK.
 - `spi`: decode CS-framed SPI bytes on MOSI and MISO. Configure `--spi-cpol`, `--spi-cpha`, `--spi-lsb-first`, and `--cs-active-level` to match the bus.
+- `can`: decode single-channel CAN/CAN FD frames. Configure nominal/data bitrate,
+  sample points, channel, and dominant level. CRC is not checked.
 
 Typical I2C no-device scan output:
 
